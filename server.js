@@ -1,59 +1,44 @@
 /**
- * server.js – Application entry point
+ * server.js – Ostello API Entry Point
  *
- * This file:
- *  1. Creates the Express app
- *  2. Attaches global middleware (JSON body parser, CORS)
- *  3. Mounts route groups under /api
- *  4. Starts the HTTP server
- *
- * KEY CONCEPT – Middleware
- * Middleware functions run BEFORE your route handlers.  Express processes
- * them in the order they are registered with app.use().
+ * Hostel Discovery & Booking Platform
  */
 
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 
-// Load environment variables from the .env file into process.env
 dotenv.config();
 
-// Import the three route groups (each is its own Express Router)
+// Import route groups
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
-const chapterRoutes = require('./routes/chapterRoutes');
+const hostelRoutes = require('./routes/hostelRoutes');
+const roomRoutes = require('./routes/roomRoutes');
+const bookingRoutes = require('./routes/bookingRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const reviewRoutes = require('./routes/reviewRoutes');
 
 // ─── Create Express Application ──────────────────────────────────────────────
 const app = express();
 
 // ─── Global Middleware ────────────────────────────────────────────────────────
-
-// Parse incoming JSON request bodies automatically so controllers can read
-// req.body as a plain JavaScript object.
 app.use(express.json());
-
-// Allow requests from other origins (e.g. the React dev server on port 5173).
-// In production you would whitelist specific origins instead of '*'.
 app.use(cors());
 
 // ─── Health-Check Route ───────────────────────────────────────────────────────
-// A simple GET / that lets you quickly verify the server is alive.
-// Try: curl http://localhost:3000/
 app.get('/', (req, res) => {
-  res.json({ message: 'Academia API is running 🚀', status: 'ok' });
+  res.json({ message: 'Ostello API is running 🏠', status: 'ok' });
 });
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
-// All routes are prefixed with /api to namespace them away from other paths.
-//
-//  /api/register  POST  → authRoutes
-//  /api/login     POST  → authRoutes
-//  /api/users     GET / PUT / DELETE  → userRoutes   (protected)
-//  /api/chapters  GET / POST / PUT / DELETE → chapterRoutes
-app.use('/api', authRoutes);
-app.use('/api', userRoutes);
-app.use('/api', chapterRoutes);
+app.use('/api', authRoutes);      // /api/register, /api/login, /api/verify-email, etc.
+app.use('/api', userRoutes);      // /api/users/me, /api/users, /api/users/:id
+app.use('/api', hostelRoutes);    // /api/hostels, /api/hostels/:id
+app.use('/api', roomRoutes);      // /api/hostels/:id/rooms, /api/rooms/:id
+app.use('/api', bookingRoutes);   // /api/bookings, /api/bookings/:id
+app.use('/api', paymentRoutes);   // /api/payments, /api/payments/:id
+app.use('/api', reviewRoutes);    // /api/reviews, /api/hostels/:id/reviews
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 // Any request that does not match a registered route falls through to here.

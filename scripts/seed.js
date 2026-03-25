@@ -1,3 +1,10 @@
+/**
+ * scripts/seed.js – Database Schema & Seed Data for Ostello
+ *
+ * Creates all tables and inserts sample data.
+ * Run: npm run seed
+ */
+
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const dotenv = require('dotenv');
@@ -13,120 +20,284 @@ async function seed() {
         port: process.env.DB_PORT,
     });
 
-    console.log('Connected to database. Running seed...\n');
+    console.log('Connected to database. Running Ostello seed...\n');
 
-    // ── Schema ─────────────────────────────────────────────────────────────────
+    // ── Drop existing tables (in reverse dependency order) ──────────────────────
+    await db.execute('SET FOREIGN_KEY_CHECKS = 0');
+    const tables = ['reviews', 'payments', 'bookings', 'rooms', 'hostels', 'users'];
+    for (const table of tables) {
+        await db.execute(`DROP TABLE IF EXISTS ${table}`);
+    }
+    await db.execute('SET FOREIGN_KEY_CHECKS = 1');
+    console.log('✔  Dropped existing tables');
 
+    // ── Users Table ─────────────────────────────────────────────────────────────
     await db.execute(`
-    CREATE TABLE IF NOT EXISTS users (
-      id          INT AUTO_INCREMENT PRIMARY KEY,
-      username    VARCHAR(100) NOT NULL UNIQUE,
-      email       VARCHAR(150) NOT NULL UNIQUE,
-      password    VARCHAR(255) NOT NULL,
-      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE users (
+      id                   INT AUTO_INCREMENT PRIMARY KEY,
+      full_name            VARCHAR(150) NOT NULL,
+      email                VARCHAR(200) NOT NULL UNIQUE,
+      phone                VARCHAR(20),
+      password_hash        VARCHAR(255) NOT NULL,
+      role                 ENUM('STUDENT', 'CUSTODIAN', 'ADMIN') DEFAULT 'STUDENT',
+      institution          VARCHAR(200),
+      is_verified          BOOLEAN DEFAULT FALSE,
+      verification_token   VARCHAR(255),
+      reset_token          VARCHAR(255),
+      reset_token_expires  DATETIME,
+      created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
     console.log('✔  Table: users');
 
+    // ── Hostels Table ───────────────────────────────────────────────────────────
     await db.execute(`
-    CREATE TABLE IF NOT EXISTS chapters (
-      id           INT AUTO_INCREMENT PRIMARY KEY,
-      name         VARCHAR(150) NOT NULL,
-      description  TEXT,
-      chapter_type ENUM('lecture','lab','tutorial','seminar','workshop') DEFAULT 'lecture',
-      status       ENUM('active','archived') DEFAULT 'active',
-      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE hostels (
+      id             INT AUTO_INCREMENT PRIMARY KEY,
+      custodian_id   INT NOT NULL,
+      name           VARCHAR(200) NOT NULL,
+      description    TEXT,
+      address        VARCHAR(300),
+      latitude       DECIMAL(10, 8),
+      longitude      DECIMAL(11, 8),
+      photos         JSON,
+      amenities      JSON,
+      avg_rating     DECIMAL(2, 1) DEFAULT 0.0,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (custodian_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
-    // Add new columns if they don't exist yet (idempotent re-runs)
-    await db.execute(`
-      ALTER TABLE chapters
-        ADD COLUMN IF NOT EXISTS chapter_type ENUM('lecture','lab','tutorial','seminar','workshop') DEFAULT 'lecture',
-        ADD COLUMN IF NOT EXISTS status ENUM('active','archived') DEFAULT 'active'
-    `).catch(() => { }); // Silently skip if columns already exist
-    console.log('✔  Table: chapters (with chapter_type + status)');
+    console.log('✔  Table: hostels');
 
+    // ── Rooms Table ─────────────────────────────────────────────────────────────
     await db.execute(`
-    CREATE TABLE IF NOT EXISTS user_chapters (
-      user_id     INT NOT NULL,
-      chapter_id  INT NOT NULL,
-      PRIMARY KEY (user_id, chapter_id),
-      FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE,
-      FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+    CREATE TABLE rooms (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      hostel_id        INT NOT NULL,
+      room_type        VARCHAR(50) DEFAULT 'Single',
+      price_per_month  DECIMAL(10, 2) NOT NULL,
+      capacity         INT DEFAULT 1,
+      is_available     BOOLEAN DEFAULT TRUE,
+      created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (hostel_id) REFERENCES hostels(id) ON DELETE CASCADE
     )
   `);
-    console.log('✔  Table: user_chapters\n');
+    console.log('✔  Table: rooms');
 
-    // ── Seed users ─────────────────────────────────────────────────────────────
+    // ── Bookings Table ──────────────────────────────────────────────────────────
+    await db.execute(`
+    CREATE TABLE bookings (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      student_id      INT NOT NULL,
+      room_id         INT NOT NULL,
+      check_in_date   DATE NOT NULL,
+      check_out_date  DATE NOT NULL,
+      status          ENUM('PENDING', 'APPROVED', 'DECLINED', 'CANCELLED', 'COMPLETED') DEFAULT 'PENDING',
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (room_id)    REFERENCES rooms(id) ON DELETE CASCADE
+    )
+  `);
+    console.log('✔  Table: bookings');
 
+    // ── Payments Table ──────────────────────────────────────────────────────────
+    await db.execute(`
+    CREATE TABLE payments (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      booking_id       INT NOT NULL UNIQUE,
+      student_id       INT NOT NULL,
+      amount           DECIMAL(10, 2) NOT NULL,
+      method           ENUM('MOBILE_MONEY', 'CARD', 'BANK_TRANSFER') DEFAULT 'MOBILE_MONEY',
+      status           ENUM('PENDING', 'COMPLETED', 'FAILED') DEFAULT 'PENDING',
+      transaction_ref  VARCHAR(100),
+      created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE,
+      FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+    console.log('✔  Table: payments');
+
+    // ── Reviews Table ───────────────────────────────────────────────────────────
+    await db.execute(`
+    CREATE TABLE reviews (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      student_id  INT NOT NULL,
+      hostel_id   INT NOT NULL,
+      booking_id  INT NOT NULL UNIQUE,
+      rating      TINYINT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+      comment     TEXT,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (hostel_id)  REFERENCES hostels(id) ON DELETE CASCADE,
+      FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+    )
+  `);
+    console.log('✔  Table: reviews\n');
+
+    // ══════════════════════════════════════════════════════════════════════════════
+    // ── SEED DATA ─────────────────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════════════
+
+    const hash = await bcrypt.hash('password123', 10);
+
+    // ── Users ───────────────────────────────────────────────────────────────────
     const users = [
-        { username: 'alice', email: 'alice@example.com', password: 'password123' },
-        { username: 'bob', email: 'bob@example.com', password: 'password123' },
-        { username: 'charlie', email: 'charlie@example.com', password: 'password123' },
-        { username: 'diana', email: 'diana@example.com', password: 'password123' },
+        { full_name: 'Admin User', email: 'admin@ostello.com', role: 'ADMIN', institution: 'Ostello Platform' },
+        { full_name: 'John Mukasa', email: 'john@ostello.com', role: 'CUSTODIAN', institution: null },
+        { full_name: 'Grace Namuddu', email: 'grace@ostello.com', role: 'CUSTODIAN', institution: null },
+        { full_name: 'Alice Namutebi', email: 'alice@student.mak.ac.ug', role: 'STUDENT', institution: 'Makerere University' },
+        { full_name: 'Bob Ssekandi', email: 'bob@student.mak.ac.ug', role: 'STUDENT', institution: 'Makerere University' },
+        { full_name: 'Diana Kato', email: 'diana@student.ucu.ac.ug', role: 'STUDENT', institution: 'Uganda Christian University' },
     ];
 
     for (const u of users) {
-        const hash = await bcrypt.hash(u.password, 10);
         await db.execute(
-            'INSERT IGNORE INTO users (username, email, password) VALUES (?, ?, ?)',
-            [u.username, u.email, hash]
+            `INSERT INTO users (full_name, email, phone, password_hash, role, institution, is_verified)
+       VALUES (?, ?, ?, ?, ?, ?, TRUE)`,
+            [u.full_name, u.email, '+256700000000', hash, u.role, u.institution]
         );
     }
-    console.log(`✔  Seeded ${users.length} users`);
+    console.log(`✔  Seeded ${users.length} users (all verified, password: password123)`);
 
-    // ── Seed chapters ───────────────────────────────────────────────────────────
-
-    const chapters = [
-        { name: 'Introduction to Node.js', description: 'Fundamentals of Node.js runtime, event loop, and modules.', chapter_type: 'lecture', status: 'active' },
-        { name: 'Express.js Basics', description: 'Building RESTful APIs with Express – routing, middleware, and error handling.', chapter_type: 'lecture', status: 'active' },
-        { name: 'MySQL & Relational DBs', description: 'Database design, SQL queries, joins, and transactions.', chapter_type: 'lab', status: 'active' },
-        { name: 'Authentication & JWT', description: 'User auth with bcrypt password hashing and JSON Web Tokens.', chapter_type: 'tutorial', status: 'active' },
-        { name: 'Deployment & DevOps', description: 'Containerising apps with Docker and deploying to cloud platforms.', chapter_type: 'workshop', status: 'active' },
-        { name: 'React Fundamentals', description: 'Components, props, state, and hooks in React 19.', chapter_type: 'lecture', status: 'active' },
-        { name: 'REST API Design', description: 'Best practices for designing clean and scalable REST APIs.', chapter_type: 'seminar', status: 'active' },
-        { name: 'SQL Lab: Joins & Indexes', description: 'Hands-on SQL exercises covering joins, sub-queries and indexing.', chapter_type: 'lab', status: 'archived' },
+    // ── Hostels ─────────────────────────────────────────────────────────────────
+    // Custodian IDs: John=2, Grace=3
+    const hostels = [
+        {
+            custodian_id: 2,
+            name: 'Mukasa Heights Hostel',
+            description: 'Modern hostel with spacious rooms near Makerere University. 24/7 security, free Wi-Fi, and study rooms available.',
+            address: 'Wandegeya, Kampala',
+            latitude: 0.3380,
+            longitude: 32.5697,
+            photos: JSON.stringify(['https://images.unsplash.com/photo-1555854877-bab0e564b8d5?w=800']),
+            amenities: JSON.stringify(['WiFi', 'Security', 'Study Room', 'Parking', 'Laundry']),
+        },
+        {
+            custodian_id: 2,
+            name: 'Greenview Residences',
+            description: 'Affordable student accommodation with a green environment. Walking distance to campus.',
+            address: 'Kikoni, Kampala',
+            latitude: 0.3355,
+            longitude: 32.5630,
+            photos: JSON.stringify(['https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=800']),
+            amenities: JSON.stringify(['WiFi', 'Security', 'Kitchen', 'Water Tank']),
+        },
+        {
+            custodian_id: 3,
+            name: 'Grace Court Hostel',
+            description: 'Premium hostel for students who value comfort. Fully furnished rooms with en-suite bathrooms.',
+            address: 'Mukono Town',
+            latitude: 0.3536,
+            longitude: 32.7551,
+            photos: JSON.stringify(['https://images.unsplash.com/photo-1631049307264-da0ec9d70304?w=800']),
+            amenities: JSON.stringify(['WiFi', 'Security', 'Gym', 'Kitchen', 'TV Room', 'En-suite']),
+        },
+        {
+            custodian_id: 3,
+            name: 'UCU View Hostel',
+            description: 'Located right next to UCU campus. Convenient and well-maintained.',
+            address: 'Bishop Tucker Rd, Mukono',
+            latitude: 0.3530,
+            longitude: 32.7590,
+            photos: JSON.stringify(['https://images.unsplash.com/photo-1564078516393-cf04bd966897?w=800']),
+            amenities: JSON.stringify(['WiFi', 'Security', 'Study Room', 'Canteen']),
+        },
     ];
 
-    for (const c of chapters) {
+    for (const h of hostels) {
         await db.execute(
-            'INSERT IGNORE INTO chapters (name, description, chapter_type, status) VALUES (?, ?, ?, ?)',
-            [c.name, c.description, c.chapter_type, c.status]
+            `INSERT INTO hostels (custodian_id, name, description, address, latitude, longitude, photos, amenities)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [h.custodian_id, h.name, h.description, h.address, h.latitude, h.longitude, h.photos, h.amenities]
         );
     }
-    console.log(`✔  Seeded ${chapters.length} chapters`);
+    console.log(`✔  Seeded ${hostels.length} hostels`);
 
-    // ── Assign users to chapters ────────────────────────────────────────────────
-
-    const [allUsers] = await db.execute('SELECT id FROM users    ORDER BY id');
-    const [allChapters] = await db.execute('SELECT id FROM chapters ORDER BY id');
-
-    // alice  → chapters 1, 2, 3
-    // bob    → chapters 2, 4
-    // charlie → chapters 1, 3, 5
-    // diana  → all chapters
-    const assignments = [
-        [0, 0], [0, 1], [0, 2],
-        [1, 1], [1, 3],
-        [2, 0], [2, 2], [2, 4],
-        [3, 0], [3, 1], [3, 2], [3, 3], [3, 4],
+    // ── Rooms ───────────────────────────────────────────────────────────────────
+    const rooms = [
+        // Mukasa Heights (hostel 1)
+        { hostel_id: 1, room_type: 'Single', price: 350000, capacity: 1 },
+        { hostel_id: 1, room_type: 'Double', price: 500000, capacity: 2 },
+        { hostel_id: 1, room_type: 'Single', price: 350000, capacity: 1 },
+        // Greenview (hostel 2)
+        { hostel_id: 2, room_type: 'Single', price: 250000, capacity: 1 },
+        { hostel_id: 2, room_type: 'Double', price: 400000, capacity: 2 },
+        // Grace Court (hostel 3)
+        { hostel_id: 3, room_type: 'Single', price: 500000, capacity: 1 },
+        { hostel_id: 3, room_type: 'Double', price: 750000, capacity: 2 },
+        { hostel_id: 3, room_type: 'Studio', price: 900000, capacity: 1 },
+        // UCU View (hostel 4)
+        { hostel_id: 4, room_type: 'Single', price: 300000, capacity: 1 },
+        { hostel_id: 4, room_type: 'Double', price: 450000, capacity: 2 },
     ];
 
-    let assigned = 0;
-    for (const [ui, ci] of assignments) {
-        if (allUsers[ui] && allChapters[ci]) {
-            await db.execute(
-                'INSERT IGNORE INTO user_chapters (user_id, chapter_id) VALUES (?, ?)',
-                [allUsers[ui].id, allChapters[ci].id]
-            );
-            assigned++;
-        }
+    for (const r of rooms) {
+        await db.execute(
+            'INSERT INTO rooms (hostel_id, room_type, price_per_month, capacity) VALUES (?, ?, ?, ?)',
+            [r.hostel_id, r.room_type, r.price, r.capacity]
+        );
     }
-    console.log(`✔  Assigned users to chapters (${assigned} memberships)\n`);
+    console.log(`✔  Seeded ${rooms.length} rooms`);
 
-    console.log('Seed complete! You can log in with any seeded user:');
-    console.log('  username: alice | bob | charlie | diana');
-    console.log('  password: password123');
+    // ── Bookings ────────────────────────────────────────────────────────────────
+    const bookings = [
+        { student_id: 4, room_id: 1, check_in: '2026-02-01', check_out: '2026-06-30', status: 'COMPLETED' },
+        { student_id: 5, room_id: 4, check_in: '2026-03-01', check_out: '2026-07-31', status: 'APPROVED' },
+        { student_id: 6, room_id: 6, check_in: '2026-04-01', check_out: '2026-08-31', status: 'PENDING' },
+        { student_id: 4, room_id: 9, check_in: '2026-04-15', check_out: '2026-08-15', status: 'PENDING' },
+    ];
+
+    for (const b of bookings) {
+        await db.execute(
+            'INSERT INTO bookings (student_id, room_id, check_in_date, check_out_date, status) VALUES (?, ?, ?, ?, ?)',
+            [b.student_id, b.room_id, b.check_in, b.check_out, b.status]
+        );
+    }
+    console.log(`✔  Seeded ${bookings.length} bookings`);
+
+    // ── Payments ────────────────────────────────────────────────────────────────
+    await db.execute(
+        `INSERT INTO payments (booking_id, student_id, amount, method, status, transaction_ref)
+     VALUES (1, 4, 350000, 'MOBILE_MONEY', 'COMPLETED', 'OST-SEED0001')`
+    );
+    console.log('✔  Seeded 1 payment');
+
+    // Mark room 1 as unavailable (booked)
+    await db.execute('UPDATE rooms SET is_available = FALSE WHERE id = 1');
+
+    // ── Reviews ─────────────────────────────────────────────────────────────────
+    await db.execute(
+        `INSERT INTO reviews (student_id, hostel_id, booking_id, rating, comment)
+     VALUES (4, 1, 1, 4, 'Great hostel! Clean rooms and friendly staff. The WiFi could be faster though.')`
+    );
+
+    // Update avg_rating for hostel 1
+    await db.execute(`
+    UPDATE hostels SET avg_rating = (
+      SELECT COALESCE(AVG(rating), 0) FROM reviews WHERE hostel_id = 1
+    ) WHERE id = 1
+  `);
+    console.log('✔  Seeded 1 review\n');
+
+    // ── Summary ─────────────────────────────────────────────────────────────────
+    console.log('═══════════════════════════════════════════');
+    console.log('  Ostello seed complete! 🏠');
+    console.log('═══════════════════════════════════════════');
+    console.log('');
+    console.log('  Login credentials (password: password123):');
+    console.log('');
+    console.log('  ADMIN:');
+    console.log('    admin@ostello.com');
+    console.log('');
+    console.log('  CUSTODIANS:');
+    console.log('    john@ostello.com');
+    console.log('    grace@ostello.com');
+    console.log('');
+    console.log('  STUDENTS:');
+    console.log('    alice@student.mak.ac.ug');
+    console.log('    bob@student.mak.ac.ug');
+    console.log('    diana@student.ucu.ac.ug');
+    console.log('');
 
     await db.end();
 }

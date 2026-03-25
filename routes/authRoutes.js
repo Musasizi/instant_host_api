@@ -1,24 +1,23 @@
 /**
- * routes/authRoutes.js – Authentication Routes
+ * routes/authRoutes.js – Authentication Routes (Ostello)
  *
- * These routes are PUBLIC – no token required.
- *
- * KEY CONCEPT – Express Router
- * express.Router() creates a mini-app that handles only its own routes.
- * We mount it in server.js with app.use('/api', authRoutes), so:
- *   router.post('/register')  becomes  POST /api/register
- *   router.post('/login')     becomes  POST /api/login
+ * Public routes:
+ *   POST /api/register         → register with role
+ *   POST /api/login            → authenticate
+ *   GET  /api/verify-email     → verify email
+ *   POST /api/forgot-password  → request password reset
+ *   POST /api/reset-password   → reset password
  */
 
 const express = require('express');
-const { register, login } = require('../controllers/authController');
+const { register, login, verifyEmail, forgotPassword, resetPassword } = require('../controllers/authController');
 
 const router = express.Router();
 
-// POST /api/register – Create a new user account
 router.post('/register', register);
-
-// POST /api/login – Authenticate and receive a JWT
 router.post('/login', login);
+router.get('/verify-email', verifyEmail);
+router.post('/forgot-password', forgotPassword);
+router.post('/reset-password', resetPassword);
 
 module.exports = router;

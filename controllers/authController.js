@@ -1,104 +1,195 @@
 /**
- * controllers/authController.js – Authentication Controller
+ * controllers/authController.js – Authentication Controller (Ostello)
  *
- * KEY CONCEPT – Controller Responsibility
- * Controllers sit between the route and the model.
- *  • They validate & parse the incoming request (req.body, req.params)
- *  • They call one or more model methods to read/write the database
- *  • They build and send the HTTP response
- *
- * KEY CONCEPT – Password Hashing (bcrypt)
- * Passwords must NEVER be stored as plain text.
- * bcrypt hashes the password into a one-way digest.
- * During login we use bcrypt.compare() to check the attempt against the hash.
- *
- * KEY CONCEPT – JWT (JSON Web Token)
- * After a successful login we sign a token that encodes the user's id and
- * username.  The client sends this token in the Authorization header of every
- * subsequent request.  The server verifies the signature with JWT_SECRET.
+ * Endpoints:
+ *   POST /api/register         – Register with role selection
+ *   POST /api/login            – Authenticate and receive JWT
+ *   GET  /api/verify-email     – Verify email with token
+ *   POST /api/forgot-password  – Request password reset link
+ *   POST /api/reset-password   – Reset password with token
  */
 
 const User = require('../models/userModel');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
 const dotenv = require('dotenv');
+const { sendVerificationEmail, sendPasswordResetEmail } = require('../utils/email');
 
 dotenv.config();
 
 /**
  * POST /api/register
- * Create a new user account.
- * Body: { username, password, email }
+ * Body: { full_name, email, phone, password, role, institution }
  */
 const register = async (req, res) => {
-  const { username, password, email } = req.body;
+    const { full_name, email, phone, password, role, institution } = req.body;
 
-  // ── Input Validation ───────────────────────────────────────────────────────
-  // Always validate before touching the database.
-  if (!username || !password || !email) {
-    return res.status(400).json({ error: 'username, password and email are required.' });
-  }
-
-  try {
-    // The User model hashes the password before inserting (see userModel.js)
-    await User.create(username, password, email);
-    res.status(201).json({ message: 'User registered successfully.' });
-  } catch (err) {
-    // MySQL error code ER_DUP_ENTRY means username or email already exists.
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ error: 'Username or email already in use.' });
+    if (!full_name || !email || !password) {
+        return res.status(400).json({ error: 'full_name, email, and password are required.' });
     }
-    res.status(500).json({ error: err.message });
-  }
+
+    // Validate role
+    const validRoles = ['STUDENT', 'CUSTODIAN'];
+    const userRole = role ? role.toUpperCase() : 'STUDENT';
+    if (!validRoles.includes(userRole)) {
+        return res.status(400).json({ error: 'Role must be STUDENT or CUSTODIAN.' });
+    }
+
+    try {
+        const verification_token = uuidv4();
+
+        await User.create({
+            full_name,
+            email,
+            phone,
+            password,
+            role: userRole,
+            institution,
+            verification_token,
+        });
+
+        // Send verification email (non-blocking)
+        sendVerificationEmail(email, verification_token);
+
+        res.status(201).json({
+            message: 'Registration successful! Please check your email to verify your account.',
+        });
+    } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'Email already in use.' });
+        }
+        res.status(500).json({ error: err.message });
+    }
 };
 
 /**
  * POST /api/login
- * Authenticate a user and return a JWT.
- * Body: { username, password }
- * Response: { token, user: { id, username, email } }
+ * Body: { email, password }
+ * Response: { token, user: { id, full_name, email, role } }
  */
 const login = async (req, res) => {
-  const { username, password } = req.body;
+    const { email, password } = req.body;
 
-  // ── Input Validation ───────────────────────────────────────────────────────
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password are required.' });
-  }
-
-  try {
-    // Step 1 – Find the user in the database
-    const [results] = await User.findByUsername(username);
-    if (results.length === 0) {
-      // Use a generic message – don't tell attackers which field was wrong.
-      return res.status(401).json({ error: 'Invalid credentials.' });
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required.' });
     }
 
-    const user = results[0];
+    try {
+        const [results] = await User.findByEmail(email);
+        if (results.length === 0) {
+            return res.status(401).json({ error: 'Invalid credentials.' });
+        }
 
-    // Step 2 – Compare the submitted password with the stored bcrypt hash
-    const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
+        const user = results[0];
+
+        // Check if email is verified
+        if (!user.is_verified) {
+            return res.status(403).json({ error: 'Please verify your email before logging in.' });
+        }
+
+        const validPassword = await bcrypt.compare(password, user.password_hash);
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid credentials.' });
+        }
+
+        const token = jwt.sign(
+            { id: user.id, email: user.email, full_name: user.full_name, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                full_name: user.full_name,
+                email: user.email,
+                role: user.role,
+                phone: user.phone,
+                institution: user.institution,
+            },
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    // Step 3 – Sign a JWT with a 24-hour expiry
-    // The payload ({ id, username }) is readable by anyone, so don't put
-    // sensitive data (like passwords) in it.
-    const token = jwt.sign(
-      { id: user.id, username: user.username },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    // Step 4 – Return the token plus safe user info (no password!)
-    res.json({
-      token,
-      user: { id: user.id, username: user.username, email: user.email },
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 };
 
-module.exports = { register, login };
+/**
+ * GET /api/verify-email?token=xxx
+ */
+const verifyEmail = async (req, res) => {
+    const { token } = req.query;
+
+    if (!token) {
+        return res.status(400).json({ error: 'Verification token is required.' });
+    }
+
+    try {
+        const [results] = await User.findByVerificationToken(token);
+        if (results.length === 0) {
+            return res.status(400).json({ error: 'Invalid or expired verification token.' });
+        }
+
+        await User.verify(results[0].id);
+        res.json({ message: 'Email verified successfully! You can now log in.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * POST /api/forgot-password
+ * Body: { email }
+ */
+const forgotPassword = async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).json({ error: 'Email is required.' });
+    }
+
+    try {
+        const [results] = await User.findByEmail(email);
+        if (results.length === 0) {
+            // Don't reveal if email exists
+            return res.json({ message: 'If an account exists with that email, a reset link has been sent.' });
+        }
+
+        const reset_token = uuidv4();
+        const expires = new Date(Date.now() + 3600000); // 1 hour
+
+        await User.setResetToken(results[0].id, reset_token, expires);
+        sendPasswordResetEmail(email, reset_token);
+
+        res.json({ message: 'If an account exists with that email, a reset link has been sent.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+/**
+ * POST /api/reset-password
+ * Body: { token, password }
+ */
+const resetPassword = async (req, res) => {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+        return res.status(400).json({ error: 'Token and new password are required.' });
+    }
+
+    try {
+        const [results] = await User.findByResetToken(token);
+        if (results.length === 0) {
+            return res.status(400).json({ error: 'Invalid or expired reset token.' });
+        }
+
+        await User.updatePassword(results[0].id, password);
+        res.json({ message: 'Password reset successful! You can now log in with your new password.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+module.exports = { register, login, verifyEmail, forgotPassword, resetPassword };
